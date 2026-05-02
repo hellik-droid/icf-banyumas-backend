@@ -13,12 +13,17 @@ app.use(express.json());
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: { origin: "*" },
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+  },
 });
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+  ssl: {
+    rejectUnauthorized: false,
+  },
 });
 
 async function initDatabase() {
@@ -39,38 +44,10 @@ app.get("/", (req, res) => {
   res.send("ICF Banyumas Backend Running 🚀");
 });
 
-app.post("/tracking", async (req, res) => {
-  try {
-    const { athleteName, latitude, longitude } = req.body;
-
-    const result = await pool.query(
-      `INSERT INTO tracking_logs (athlete_name, latitude, longitude)
-       VALUES ($1, $2, $3)
-       RETURNING *`,
-      [athleteName, latitude, longitude]
-    );
-
-    const data = result.rows[0];
-    io.emit("location-update", data);
-
-    res.json({
-      success: true,
-      message: "Location saved to database",
-      data,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to save location",
-      error: error.message,
-    });
-  }
-});
-
 app.get("/tracking", async (req, res) => {
   try {
     const result = await pool.query(
-      "SELECT * FROM tracking_logs ORDER BY timestamp DESC LIMIT 100"
+      "SELECT * FROM tracking_logs ORDER BY timestamp DESC LIMIT 200"
     );
 
     res.json(result.rows);
@@ -83,8 +60,71 @@ app.get("/tracking", async (req, res) => {
   }
 });
 
+app.post("/tracking", async (req, res) => {
+  try {
+    const { athleteName, latitude, longitude } = req.body;
+
+    if (!athleteName || latitude === null || longitude === null) {
+      return res.status(400).json({
+        success: false,
+        message: "athleteName, latitude, and longitude are required",
+      });
+    }
+
+    const lat = Number(latitude);
+    const lng = Number(longitude);
+
+    if (
+      Number.isNaN(lat) ||
+      Number.isNaN(lng) ||
+      lat < -90 ||
+      lat > 90 ||
+      lng < -180 ||
+      lng > 180
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid GPS coordinate",
+      });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO tracking_logs (athlete_name, latitude, longitude)
+       VALUES ($1, $2, $3)
+       RETURNING *`,
+      [athleteName, lat, lng]
+    );
+
+    const data = result.rows[0];
+
+    io.emit("location-update", data);
+
+    res.json({
+      success: true,
+      message: "Location saved and broadcasted",
+      data,
+    });
+  } catch (error) {
+    console.error("Tracking error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "Failed to save location",
+      error: error.message,
+    });
+  }
+});
+
 io.on("connection", (socket) => {
   console.log("Client connected:", socket.id);
+
+  socket.emit("connected", {
+    message: "Connected to ICF Banyumas realtime server",
+  });
+
+  socket.on("disconnect", () => {
+    console.log("Client disconnected:", socket.id);
+  });
 });
 
 const PORT = process.env.PORT || 3000;
