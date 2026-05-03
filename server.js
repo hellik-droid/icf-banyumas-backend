@@ -36,6 +36,14 @@ async function initDatabase() {
       timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
+  await pool.query(`
+  CREATE TABLE IF NOT EXISTS athletes (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(100) UNIQUE NOT NULL,
+    password VARCHAR(100) NOT NULL,
+    athlete_name VARCHAR(100) NOT NULL
+  );
+`);
 
   console.log("Database ready");
 }
@@ -94,6 +102,33 @@ app.post("/login", async (req, res) => {
     });
   }
 });
+<<<<<<< HEAD
+=======
+app.post("/athletes", async (req, res) => {
+  try {
+    const { username, password, athleteName } = req.body;
+
+    const result = await pool.query(
+      `INSERT INTO athletes (username, password, athlete_name)
+       VALUES ($1, $2, $3)
+       RETURNING id, username, athlete_name`,
+      [username, password, athleteName]
+    );
+
+    res.json({
+      success: true,
+      message: "Athlete created",
+      data: result.rows[0],
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to create athlete",
+      error: error.message,
+    });
+  }
+});
+>>>>>>> 0fb509d (add athlete login)
 app.post("/tracking", async (req, res) => {
   try {
     const { athleteName, latitude, longitude } = req.body;
@@ -168,6 +203,7 @@ initDatabase().then(() => {
     console.log("Server running on port", PORT);
   });
 });
+<<<<<<< HEAD
 await pool.query(`
   CREATE TABLE IF NOT EXISTS athletes (
     id SERIAL PRIMARY KEY,
@@ -200,3 +236,5 @@ app.post("/athletes", async (req, res) => {
     });
   }
 });
+=======
+>>>>>>> 0fb509d (add athlete login)
