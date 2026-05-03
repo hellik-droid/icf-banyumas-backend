@@ -59,7 +59,41 @@ app.get("/tracking", async (req, res) => {
     });
   }
 });
+app.post("/login", async (req, res) => {
+  try {
+    const { username, password } = req.body;
 
+    const result = await pool.query(
+      "SELECT * FROM athletes WHERE username = $1 AND password = $2",
+      [username, password]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({
+        success: false,
+        message: "Username atau password salah",
+      });
+    }
+
+    const athlete = result.rows[0];
+
+    res.json({
+      success: true,
+      message: "Login berhasil",
+      athlete: {
+        id: athlete.id,
+        username: athlete.username,
+        athleteName: athlete.athlete_name,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Login error",
+      error: error.message,
+    });
+  }
+});
 app.post("/tracking", async (req, res) => {
   try {
     const { athleteName, latitude, longitude } = req.body;
