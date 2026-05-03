@@ -127,7 +127,7 @@ app.post("/athletes", async (req, res) => {
     });
   }
 });
-0fb509d (add athlete login)
+
 app.post("/tracking", async (req, res) => {
   try {
     const { athleteName, latitude, longitude } = req.body;
