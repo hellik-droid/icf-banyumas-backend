@@ -102,8 +102,7 @@ app.post("/login", async (req, res) => {
     });
   }
 });
-<<<<<<< HEAD
-=======
+
 app.post("/athletes", async (req, res) => {
   try {
     const { username, password, athleteName } = req.body;
@@ -128,7 +127,7 @@ app.post("/athletes", async (req, res) => {
     });
   }
 });
->>>>>>> 0fb509d (add athlete login)
+0fb509d (add athlete login)
 app.post("/tracking", async (req, res) => {
   try {
     const { athleteName, latitude, longitude } = req.body;
@@ -203,7 +202,7 @@ initDatabase().then(() => {
     console.log("Server running on port", PORT);
   });
 });
-<<<<<<< HEAD
+
 await pool.query(`
   CREATE TABLE IF NOT EXISTS athletes (
     id SERIAL PRIMARY KEY,
@@ -236,5 +235,4 @@ app.post("/athletes", async (req, res) => {
     });
   }
 });
-=======
->>>>>>> 0fb509d (add athlete login)
+0fb509d (add athlete login)
