@@ -1,23 +1,22 @@
 require("dotenv").config();
-
 const express = require("express");
-const http = require("http");
 const cors = require("cors");
-const { Server } = require("socket.io");
 const { Pool } = require("pg");
+const http = require("http");
+const { Server } = require("socket.io");
 
 const app = express();
-app.use(cors());
-app.use(express.json());
-
 const server = http.createServer(app);
-
 const io = new Server(server, {
   cors: {
     origin: "*",
-    methods: ["GET", "POST"],
   },
 });
+
+app.use(cors());
+app.use(express.json());
+
+const PORT = process.env.PORT || 3001;
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -26,47 +25,48 @@ const pool = new Pool({
   },
 });
 
-async function initDatabase() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS tracking_logs (
-      id SERIAL PRIMARY KEY,
-      athlete_name VARCHAR(100),
-      latitude DOUBLE PRECISION,
-      longitude DOUBLE PRECISION,
-      timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-  `);
-  await pool.query(`
-  CREATE TABLE IF NOT EXISTS athletes (
-    id SERIAL PRIMARY KEY,
-    username VARCHAR(100) UNIQUE NOT NULL,
-    password VARCHAR(100) NOT NULL,
-    athlete_name VARCHAR(100) NOT NULL
-  );
-`);
 
-  console.log("Database ready");
+// ================= DATABASE INIT =================
+async function initDatabase() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS tracking_logs (
+        id SERIAL PRIMARY KEY,
+        athlete_name VARCHAR(100),
+        latitude DOUBLE PRECISION,
+        longitude DOUBLE PRECISION,
+        speed DOUBLE PRECISION,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS athletes (
+        id SERIAL PRIMARY KEY,
+        username VARCHAR(100) UNIQUE NOT NULL,
+        password VARCHAR(100) NOT NULL,
+        athlete_name VARCHAR(100) NOT NULL
+      );
+    `);
+
+    console.log("Database ready");
+  } catch (err) {
+    console.error("DB init error:", err);
+  }
 }
 
-app.get("/", (req, res) => {
-  res.send("ICF Banyumas Backend Running 🚀");
+
+// ================= SOCKET.IO =================
+io.on("connection", (socket) => {
+  console.log("Client connected");
+
+  socket.on("disconnect", () => {
+    console.log("Client disconnected");
+  });
 });
 
-app.get("/tracking", async (req, res) => {
-  try {
-    const result = await pool.query(
-      "SELECT * FROM tracking_logs ORDER BY timestamp DESC LIMIT 200"
-    );
 
-    res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to get tracking data",
-      error: error.message,
-    });
-  }
-});
+// ================= LOGIN =================
 app.post("/login", async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -87,22 +87,18 @@ app.post("/login", async (req, res) => {
 
     res.json({
       success: true,
-      message: "Login berhasil",
       athlete: {
         id: athlete.id,
-        username: athlete.username,
         athleteName: athlete.athlete_name,
       },
     });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Login error",
-      error: error.message,
-    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
+
+// ================= CREATE ATHLETE =================
 app.post("/athletes", async (req, res) => {
   try {
     const { username, password, athleteName } = req.body;
@@ -116,123 +112,58 @@ app.post("/athletes", async (req, res) => {
 
     res.json({
       success: true,
-      message: "Athlete created",
       data: result.rows[0],
     });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to create athlete",
-      error: error.message,
-    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
+
+// ================= TRACKING =================
 app.post("/tracking", async (req, res) => {
   try {
-    const { athleteName, latitude, longitude } = req.body;
+    const { athleteName, latitude, longitude, speed } = req.body;
 
-    if (!athleteName || latitude === null || longitude === null) {
-      return res.status(400).json({
-        success: false,
-        message: "athleteName, latitude, and longitude are required",
-      });
-    }
-
-    const lat = Number(latitude);
-    const lng = Number(longitude);
-
-    if (
-      Number.isNaN(lat) ||
-      Number.isNaN(lng) ||
-      lat < -90 ||
-      lat > 90 ||
-      lng < -180 ||
-      lng > 180
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid GPS coordinate",
-      });
-    }
-
-    const result = await pool.query(
-      `INSERT INTO tracking_logs (athlete_name, latitude, longitude)
-       VALUES ($1, $2, $3)
-       RETURNING *`,
-      [athleteName, lat, lng]
+    await pool.query(
+      `INSERT INTO tracking_logs (athlete_name, latitude, longitude, speed)
+       VALUES ($1, $2, $3, $4)`,
+      [athleteName, latitude, longitude, speed || 0]
     );
 
-    const data = result.rows[0];
-
-    io.emit("location-update", data);
-
-    res.json({
-      success: true,
-      message: "Location saved and broadcasted",
-      data,
+    // realtime emit ke frontend
+    io.emit("tracking-update", {
+      athleteName,
+      latitude,
+      longitude,
+      speed,
+      timestamp: new Date(),
     });
-  } catch (error) {
-    console.error("Tracking error:", error);
 
-    res.status(500).json({
-      success: false,
-      message: "Failed to save location",
-      error: error.message,
-    });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-io.on("connection", (socket) => {
-  console.log("Client connected:", socket.id);
 
-  socket.emit("connected", {
-    message: "Connected to ICF Banyumas realtime server",
-  });
+// ================= GET TRACKING =================
+app.get("/tracking", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM tracking_logs ORDER BY timestamp DESC LIMIT 200"
+    );
 
-  socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
-  });
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-const PORT = process.env.PORT || 3000;
 
+// ================= START SERVER =================
 initDatabase().then(() => {
   server.listen(PORT, () => {
     console.log("Server running on port", PORT);
   });
 });
-
-await pool.query(`
-  CREATE TABLE IF NOT EXISTS athletes (
-    id SERIAL PRIMARY KEY,
-    username VARCHAR(100) UNIQUE NOT NULL,
-    password VARCHAR(100) NOT NULL,
-    athlete_name VARCHAR(100) NOT NULL
-  );
-`);
-app.post("/athletes", async (req, res) => {
-  try {
-    const { username, password, athleteName } = req.body;
-
-    const result = await pool.query(
-      `INSERT INTO athletes (username, password, athlete_name)
-       VALUES ($1, $2, $3)
-       RETURNING id, username, athlete_name`,
-      [username, password, athleteName]
-    );
-
-    res.json({
-      success: true,
-      message: "Athlete created",
-      data: result.rows[0],
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Failed to create athlete",
-      error: error.message,
-    });
-  }
-});
-0fb509d (add athlete login)
