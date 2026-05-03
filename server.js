@@ -57,14 +57,19 @@ async function initDB() {
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS tracking_logs (
-      id SERIAL PRIMARY KEY,
-      athlete_id INTEGER,
-      athlete_name VARCHAR(100),
-      latitude DOUBLE PRECISION,
-      longitude DOUBLE PRECISION,
-      speed DOUBLE PRECISION,
-      timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
+    id SERIAL PRIMARY KEY,
+    athlete_id INTEGER,
+    athlete_name VARCHAR(100),
+    latitude DOUBLE PRECISION,
+    longitude DOUBLE PRECISION,
+    speed DOUBLE PRECISION,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+await pool.query(`
+  ALTER TABLE tracking_logs
+  ADD COLUMN IF NOT EXISTS athlete_id INTEGER;
   `);
 
   console.log("DB READY");
