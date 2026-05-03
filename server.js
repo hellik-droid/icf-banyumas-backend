@@ -12,33 +12,46 @@ const app = express();
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: {
-    origin: "*",
-  },
+  cors: { origin: "*" },
 });
 
 app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
-const JWT_SECRET = process.env.JWT_SECRET || "icf-banyumas-secret-key";
+const JWT_SECRET = process.env.JWT_SECRET || "secret-key";
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  ssl: { rejectUnauthorized: false },
 });
 
-// ================= DATABASE INIT =================
-async function initDatabase() {
+const RACE_ROUTE = [
+  [-7.4564651, 109.2621908],
+  [-7.4563547, 109.2626408],
+  [-7.4554416, 109.262382],
+  [-7.4553538, 109.261572],
+  [-7.4564828, 109.2614795],
+  [-7.456474, 109.2622385],
+];
+
+const ROUTE_DISTANCE_KM = 1;
+
+const CHECKPOINTS = [
+  { name: "START", km: 0 },
+  { name: "CP 1", km: 0.25 },
+  { name: "CP 2", km: 0.5 },
+  { name: "CP 3", km: 0.75 },
+  { name: "FINISH", km: 1 },
+];
+
+async function initDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS athletes (
       id SERIAL PRIMARY KEY,
       username VARCHAR(100) UNIQUE NOT NULL,
       password VARCHAR(255) NOT NULL,
-      athlete_name VARCHAR(100) NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      athlete_name VARCHAR(100) NOT NULL
     );
   `);
 
@@ -49,70 +62,75 @@ async function initDatabase() {
       athlete_name VARCHAR(100),
       latitude DOUBLE PRECISION,
       longitude DOUBLE PRECISION,
-      speed DOUBLE PRECISION DEFAULT 0,
+      speed DOUBLE PRECISION,
       timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
 
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS race_settings (
-      id SERIAL PRIMARY KEY,
-      race_name VARCHAR(150) DEFAULT 'ICF Banyumas Training',
-      is_started BOOLEAN DEFAULT false,
-      started_at TIMESTAMP,
-      stopped_at TIMESTAMP
-    );
-  `);
-
-  await pool.query(`
-    INSERT INTO race_settings (id, race_name, is_started)
-    VALUES (1, 'ICF Banyumas Training', false)
-    ON CONFLICT (id) DO NOTHING;
-  `);
-
-  console.log("Database ready");
+  console.log("DB READY");
 }
 
-// ================= MIDDLEWARE =================
-function authAthlete(req, res, next) {
-  const authHeader = req.headers.authorization;
+function auth(req, res, next) {
+  const header = req.headers.authorization;
 
-  if (!authHeader) {
-    return res.status(401).json({
-      success: false,
-      message: "Token tidak ditemukan",
-    });
+  if (!header) {
+    return res.status(401).json({ success: false, message: "No token" });
   }
-
-  const token = authHeader.split(" ")[1];
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.athlete = decoded;
+    const token = header.split(" ")[1];
+    req.user = jwt.verify(token, JWT_SECRET);
     next();
-  } catch (error) {
-    return res.status(401).json({
-      success: false,
-      message: "Token tidak valid",
-    });
+  } catch {
+    return res.status(401).json({ success: false, message: "Invalid token" });
   }
 }
 
-// ================= ROOT =================
-app.get("/", (req, res) => {
-  res.send("ICF Banyumas Backend Running 🚀");
-});
+function distanceKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
 
-// ================= SOCKET =================
-io.on("connection", (socket) => {
-  console.log("Client connected:", socket.id);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
 
-  socket.on("disconnect", () => {
-    console.log("Client disconnected:", socket.id);
+  return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
+function getProgressByRoute(latitude, longitude) {
+  let nearestIndex = 0;
+  let minDistance = Infinity;
+
+  RACE_ROUTE.forEach((point, index) => {
+    const d = distanceKm(latitude, longitude, point[0], point[1]);
+
+    if (d < minDistance) {
+      minDistance = d;
+      nearestIndex = index;
+    }
   });
+
+  return nearestIndex / (RACE_ROUTE.length - 1);
+}
+
+function getNextCheckpoint(progress) {
+  return (
+    CHECKPOINTS.find((cp) => cp.km > progress) ||
+    CHECKPOINTS[CHECKPOINTS.length - 1]
+  );
+}
+
+app.get("/", (req, res) => {
+  res.send("Backend ICF Banyumas Running 🚀");
 });
 
-// ================= REGISTER ATHLETE =================
+io.on("connection", (socket) => {
+  console.log("Connected:", socket.id);
+});
+
 app.post("/athletes", async (req, res) => {
   try {
     const { username, password, athleteName } = req.body;
@@ -120,34 +138,25 @@ app.post("/athletes", async (req, res) => {
     if (!username || !password || !athleteName) {
       return res.status(400).json({
         success: false,
-        message: "username, password, dan athleteName wajib diisi",
+        message: "username, password, athleteName wajib diisi",
       });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hash = await bcrypt.hash(password, 10);
 
     const result = await pool.query(
       `INSERT INTO athletes (username, password, athlete_name)
        VALUES ($1, $2, $3)
        RETURNING id, username, athlete_name`,
-      [username, hashedPassword, athleteName]
+      [username, hash, athleteName]
     );
 
-    res.json({
-      success: true,
-      message: "Athlete created",
-      data: result.rows[0],
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Gagal membuat atlet",
-      error: error.message,
-    });
+    res.json({ success: true, data: result.rows[0] });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
   }
 });
 
-// ================= LOGIN JWT =================
 app.post("/login", async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -164,10 +173,10 @@ app.post("/login", async (req, res) => {
       });
     }
 
-    const athlete = result.rows[0];
-    const isValid = await bcrypt.compare(password, athlete.password);
+    const user = result.rows[0];
+    const valid = await bcrypt.compare(password, user.password);
 
-    if (!isValid) {
+    if (!valid) {
       return res.status(401).json({
         success: false,
         message: "Username atau password salah",
@@ -176,9 +185,8 @@ app.post("/login", async (req, res) => {
 
     const token = jwt.sign(
       {
-        id: athlete.id,
-        username: athlete.username,
-        athleteName: athlete.athlete_name,
+        id: user.id,
+        name: user.athlete_name,
       },
       JWT_SECRET,
       { expiresIn: "7d" }
@@ -186,80 +194,37 @@ app.post("/login", async (req, res) => {
 
     res.json({
       success: true,
-      message: "Login berhasil",
       token,
       athlete: {
-        id: athlete.id,
-        username: athlete.username,
-        athleteName: athlete.athlete_name,
+        id: user.id,
+        athleteName: user.athlete_name,
       },
     });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Login error",
-      error: error.message,
-    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
   }
 });
 
-// ================= POST TRACKING WITH JWT =================
-app.post("/tracking", authAthlete, async (req, res) => {
+app.post("/tracking", auth, async (req, res) => {
   try {
     const { latitude, longitude, speed } = req.body;
 
-    if (latitude === null || longitude === null) {
-      return res.status(400).json({
-        success: false,
-        message: "Latitude dan longitude wajib diisi",
-      });
-    }
-
-    const lat = Number(latitude);
-    const lng = Number(longitude);
-    const spd = Number(speed || 0);
-
-    if (
-      Number.isNaN(lat) ||
-      Number.isNaN(lng) ||
-      lat < -90 ||
-      lat > 90 ||
-      lng < -180 ||
-      lng > 180
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "Koordinat GPS tidak valid",
-      });
-    }
-
     const result = await pool.query(
-      `INSERT INTO tracking_logs
+      `INSERT INTO tracking_logs 
        (athlete_id, athlete_name, latitude, longitude, speed)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING *`,
-      [req.athlete.id, req.athlete.athleteName, lat, lng, spd]
+      [req.user.id, req.user.name, latitude, longitude, speed || 0]
     );
 
-    const newData = result.rows[0];
+    io.emit("location-update", result.rows[0]);
 
-    io.emit("location-update", newData);
-
-    res.json({
-      success: true,
-      message: "Location saved",
-      data: newData,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Gagal menyimpan tracking",
-      error: error.message,
-    });
+    res.json({ success: true, data: result.rows[0] });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
   }
 });
 
-// ================= PUBLIC TRACKING DATA =================
 app.get("/tracking", async (req, res) => {
   try {
     const result = await pool.query(
@@ -267,16 +232,21 @@ app.get("/tracking", async (req, res) => {
     );
 
     res.json(result.rows);
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
   }
 });
 
-// ================= LEADERBOARD BACKEND =================
-app.get("/leaderboard", async (req, res) => {
+app.get("/pro/checkpoints", (req, res) => {
+  res.json({
+    success: true,
+    route: RACE_ROUTE,
+    distanceKm: ROUTE_DISTANCE_KM,
+    checkpoints: CHECKPOINTS,
+  });
+});
+
+app.get("/pro/leaderboard", async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT DISTINCT ON (athlete_name)
@@ -288,36 +258,21 @@ app.get("/leaderboard", async (req, res) => {
         timestamp
       FROM tracking_logs
       WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-      ORDER BY athlete_name, timestamp DESC;
+      ORDER BY athlete_name, timestamp DESC
     `);
-
-    const startLat = -7.4564651;
-    const startLng = 109.2621908;
-
-    function distanceKm(lat1, lon1, lat2, lon2) {
-      const R = 6371;
-      const dLat = ((lat2 - lat1) * Math.PI) / 180;
-      const dLon = ((lon2 - lon1) * Math.PI) / 180;
-
-      const a =
-        Math.sin(dLat / 2) ** 2 +
-        Math.cos((lat1 * Math.PI) / 180) *
-          Math.cos((lat2 * Math.PI) / 180) *
-          Math.sin(dLon / 2) ** 2;
-
-      return R * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
-    }
 
     const leaderboard = result.rows
       .map((item) => {
-        const distance = distanceKm(
-          startLat,
-          startLng,
+        const progress = getProgressByRoute(
           Number(item.latitude),
           Number(item.longitude)
         );
 
+        const distance = progress * ROUTE_DISTANCE_KM;
         const speed = Number(item.speed || 0);
+        const remainingKm = Math.max(ROUTE_DISTANCE_KM - distance, 0);
+        const eta = speed > 0 ? (remainingKm / speed) * 60 : 0;
+        const nextCheckpoint = getNextCheckpoint(progress);
 
         return {
           athlete_id: item.athlete_id,
@@ -325,163 +280,72 @@ app.get("/leaderboard", async (req, res) => {
           latitude: item.latitude,
           longitude: item.longitude,
           speed_kmh: speed,
-          distance_km: distance,
           pace_min_km: speed > 0 ? 60 / speed : 0,
+          progress_percent: Number((progress * 100).toFixed(1)),
+          distance_km: Number(distance.toFixed(2)),
+          next_checkpoint: nextCheckpoint.name,
+          eta_minutes: Number(eta.toFixed(1)),
+          status:
+            progress >= 1 ? "FINISHED" : speed > 1 ? "MOVING" : "STOPPED",
           timestamp: item.timestamp,
-          status: speed > 1 ? "MOVING" : "STOPPED",
         };
       })
-      .sort((a, b) => b.distance_km - a.distance_km);
+      .sort((a, b) => b.progress_percent - a.progress_percent);
 
     res.json({
       success: true,
+      routeDistanceKm: ROUTE_DISTANCE_KM,
       data: leaderboard,
     });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
   }
 });
 
-// ================= ADMIN ENDPOINTS =================
-app.get("/admin/athletes", async (req, res) => {
+app.get("/pro/finishers", async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT id, username, athlete_name, created_at
-      FROM athletes
-      ORDER BY id ASC
-    `);
-
-    res.json({
-      success: true,
-      data: result.rows,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
-
-app.get("/admin/tracking", async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT *
+      SELECT DISTINCT ON (athlete_name)
+        athlete_id,
+        athlete_name,
+        latitude,
+        longitude,
+        speed,
+        timestamp
       FROM tracking_logs
-      ORDER BY timestamp DESC
-      LIMIT 1000
+      WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+      ORDER BY athlete_name, timestamp DESC
     `);
+
+    const finishers = result.rows
+      .map((item) => {
+        const progress = getProgressByRoute(
+          Number(item.latitude),
+          Number(item.longitude)
+        );
+
+        return {
+          athlete_id: item.athlete_id,
+          athlete_name: item.athlete_name,
+          progress_percent: Number((progress * 100).toFixed(1)),
+          finished: progress >= 1,
+          finish_time: progress >= 1 ? item.timestamp : null,
+        };
+      })
+      .filter((item) => item.finished);
 
     res.json({
       success: true,
-      data: result.rows,
+      totalFinishers: finishers.length,
+      data: finishers,
     });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
   }
 });
 
-app.get("/admin/summary", async (req, res) => {
-  try {
-    const totalAthletes = await pool.query(
-      "SELECT COUNT(*) FROM athletes"
-    );
-
-    const totalTracking = await pool.query(
-      "SELECT COUNT(*) FROM tracking_logs"
-    );
-
-    const activeAthletes = await pool.query(`
-      SELECT COUNT(DISTINCT athlete_name)
-      FROM tracking_logs
-      WHERE timestamp > NOW() - INTERVAL '5 minutes'
-    `);
-
-    const race = await pool.query(
-      "SELECT * FROM race_settings WHERE id = 1"
-    );
-
-    res.json({
-      success: true,
-      data: {
-        totalAthletes: Number(totalAthletes.rows[0].count),
-        totalTracking: Number(totalTracking.rows[0].count),
-        activeAthletes: Number(activeAthletes.rows[0].count),
-        race: race.rows[0],
-      },
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
-
-app.post("/admin/race/start", async (req, res) => {
-  try {
-    const result = await pool.query(`
-      UPDATE race_settings
-      SET is_started = true,
-          started_at = CURRENT_TIMESTAMP,
-          stopped_at = NULL
-      WHERE id = 1
-      RETURNING *
-    `);
-
-    io.emit("race-status", result.rows[0]);
-
-    res.json({
-      success: true,
-      message: "Race started",
-      data: result.rows[0],
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
-
-app.post("/admin/race/stop", async (req, res) => {
-  try {
-    const result = await pool.query(`
-      UPDATE race_settings
-      SET is_started = false,
-          stopped_at = CURRENT_TIMESTAMP
-      WHERE id = 1
-      RETURNING *
-    `);
-
-    io.emit("race-status", result.rows[0]);
-
-    res.json({
-      success: true,
-      message: "Race stopped",
-      data: result.rows[0],
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: error.message,
-    });
-  }
-});
-
-// ================= START SERVER =================
-initDatabase()
-  .then(() => {
-    server.listen(PORT, () => {
-      console.log("Server running on port", PORT);
-    });
-  })
-  .catch((error) => {
-    console.error("Failed to start server:", error);
+initDB().then(() => {
+  server.listen(PORT, () => {
+    console.log("RUNNING ON", PORT);
   });
+});
