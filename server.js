@@ -134,3 +134,11 @@ initDatabase().then(() => {
     console.log("Server running on port", PORT);
   });
 });
+await pool.query(`
+  CREATE TABLE IF NOT EXISTS athletes (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(100) UNIQUE NOT NULL,
+    password VARCHAR(100) NOT NULL,
+    athlete_name VARCHAR(100) NOT NULL
+  );
+`);
