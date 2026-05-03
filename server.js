@@ -1,70 +1,102 @@
 require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
 const http = require("http");
 const { Server } = require("socket.io");
+const jwt = require("jsonwebtoken");
+const bcrypt = require("bcryptjs");
 
 const app = express();
 const server = http.createServer(app);
+
 const io = new Server(server, {
-  cors: {
-    origin: "*",
-  },
+  cors: { origin: "*" },
 });
 
 app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
+const JWT_SECRET = process.env.JWT_SECRET || "secret-key";
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  ssl: { rejectUnauthorized: false },
 });
 
+// ================= INIT DB =================
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS athletes (
+      id SERIAL PRIMARY KEY,
+      username VARCHAR(100) UNIQUE NOT NULL,
+      password VARCHAR(255) NOT NULL,
+      athlete_name VARCHAR(100) NOT NULL
+    );
+  `);
 
-// ================= DATABASE INIT =================
-async function initDatabase() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS tracking_logs (
+      id SERIAL PRIMARY KEY,
+      athlete_id INTEGER,
+      athlete_name VARCHAR(100),
+      latitude DOUBLE PRECISION,
+      longitude DOUBLE PRECISION,
+      speed DOUBLE PRECISION,
+      timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  console.log("DB READY");
+}
+
+// ================= AUTH =================
+function auth(req, res, next) {
+  const header = req.headers.authorization;
+
+  if (!header) return res.status(401).json({ message: "No token" });
+
   try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS tracking_logs (
-        id SERIAL PRIMARY KEY,
-        athlete_name VARCHAR(100),
-        latitude DOUBLE PRECISION,
-        longitude DOUBLE PRECISION,
-        speed DOUBLE PRECISION,
-        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS athletes (
-        id SERIAL PRIMARY KEY,
-        username VARCHAR(100) UNIQUE NOT NULL,
-        password VARCHAR(100) NOT NULL,
-        athlete_name VARCHAR(100) NOT NULL
-      );
-    `);
-
-    console.log("Database ready");
-  } catch (err) {
-    console.error("DB init error:", err);
+    const token = header.split(" ")[1];
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch {
+    return res.status(401).json({ message: "Invalid token" });
   }
 }
 
-
-// ================= SOCKET.IO =================
-io.on("connection", (socket) => {
-  console.log("Client connected");
-
-  socket.on("disconnect", () => {
-    console.log("Client disconnected");
-  });
+// ================= ROOT =================
+app.get("/", (req, res) => {
+  res.send("Backend ICF Banyumas Running 🚀");
 });
 
+// ================= SOCKET =================
+io.on("connection", (socket) => {
+  console.log("Connected:", socket.id);
+});
+
+// ================= REGISTER =================
+app.post("/athletes", async (req, res) => {
+  try {
+    const { username, password, athleteName } = req.body;
+
+    const hash = await bcrypt.hash(password, 10);
+
+    const result = await pool.query(
+      `INSERT INTO athletes (username, password, athlete_name)
+       VALUES ($1, $2, $3)
+       RETURNING *`,
+      [username, hash, athleteName]
+    );
+
+    res.json(result.rows[0]);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ================= LOGIN =================
 app.post("/login", async (req, res) => {
@@ -72,98 +104,76 @@ app.post("/login", async (req, res) => {
     const { username, password } = req.body;
 
     const result = await pool.query(
-      "SELECT * FROM athletes WHERE username = $1 AND password = $2",
-      [username, password]
+      "SELECT * FROM athletes WHERE username=$1",
+      [username]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(401).json({
-        success: false,
-        message: "Username atau password salah",
-      });
-    }
+    if (result.rows.length === 0)
+      return res.status(401).json({ message: "User not found" });
 
-    const athlete = result.rows[0];
+    const user = result.rows[0];
 
-    res.json({
-      success: true,
-      athlete: {
-        id: athlete.id,
-        athleteName: athlete.athlete_name,
+    const valid = await bcrypt.compare(password, user.password);
+    if (!valid) return res.status(401).json({ message: "Wrong password" });
+
+    const token = jwt.sign(
+      {
+        id: user.id,
+        name: user.athlete_name,
       },
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-
-// ================= CREATE ATHLETE =================
-app.post("/athletes", async (req, res) => {
-  try {
-    const { username, password, athleteName } = req.body;
-
-    const result = await pool.query(
-      `INSERT INTO athletes (username, password, athlete_name)
-       VALUES ($1, $2, $3)
-       RETURNING id, username, athlete_name`,
-      [username, password, athleteName]
+      JWT_SECRET
     );
 
-    res.json({
-      success: true,
-      data: result.rows[0],
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.json({ token });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
-
 
 // ================= TRACKING =================
-app.post("/tracking", async (req, res) => {
+app.post("/tracking", auth, async (req, res) => {
   try {
-    const { athleteName, latitude, longitude, speed } = req.body;
+    const { latitude, longitude, speed } = req.body;
 
-    await pool.query(
-      `INSERT INTO tracking_logs (athlete_name, latitude, longitude, speed)
-       VALUES ($1, $2, $3, $4)`,
-      [athleteName, latitude, longitude, speed || 0]
+    const result = await pool.query(
+      `INSERT INTO tracking_logs 
+       (athlete_id, athlete_name, latitude, longitude, speed)
+       VALUES ($1,$2,$3,$4,$5)
+       RETURNING *`,
+      [req.user.id, req.user.name, latitude, longitude, speed]
     );
 
-    // realtime emit ke frontend
-    io.emit("tracking-update", {
-      athleteName,
-      latitude,
-      longitude,
-      speed,
-      timestamp: new Date(),
-    });
+    io.emit("update", result.rows[0]);
 
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.json(result.rows[0]);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
   }
 });
-
 
 // ================= GET TRACKING =================
 app.get("/tracking", async (req, res) => {
-  try {
-    const result = await pool.query(
-      "SELECT * FROM tracking_logs ORDER BY timestamp DESC LIMIT 200"
-    );
-
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  const result = await pool.query(
+    "SELECT * FROM tracking_logs ORDER BY timestamp DESC LIMIT 500"
+  );
+  res.json(result.rows);
 });
 
+// ================= LEADERBOARD =================
+app.get("/leaderboard", async (req, res) => {
+  const result = await pool.query(`
+    SELECT DISTINCT ON (athlete_name)
+    athlete_name, latitude, longitude, speed, timestamp
+    FROM tracking_logs
+    ORDER BY athlete_name, timestamp DESC
+  `);
 
-// ================= START SERVER =================
-initDatabase().then(() => {
+  res.json(result.rows);
+});
+
+// ================= START =================
+initDB().then(() => {
   server.listen(PORT, () => {
-    console.log("Server running on port", PORT);
+    console.log("RUNNING ON", PORT);
   });
 });
