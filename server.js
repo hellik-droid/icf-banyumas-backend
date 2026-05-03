@@ -176,3 +176,27 @@ await pool.query(`
     athlete_name VARCHAR(100) NOT NULL
   );
 `);
+app.post("/athletes", async (req, res) => {
+  try {
+    const { username, password, athleteName } = req.body;
+
+    const result = await pool.query(
+      `INSERT INTO athletes (username, password, athlete_name)
+       VALUES ($1, $2, $3)
+       RETURNING id, username, athlete_name`,
+      [username, password, athleteName]
+    );
+
+    res.json({
+      success: true,
+      message: "Athlete created",
+      data: result.rows[0],
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Failed to create athlete",
+      error: error.message,
+    });
+  }
+});
