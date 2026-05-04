@@ -7,6 +7,8 @@ const http = require("http");
 const { Server } = require("socket.io");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
+const nodemailer = require("nodemailer");
 
 const app = express();
 const server = http.createServer(app);
@@ -20,6 +22,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || "icf-banyumas-secret-key";
+const APP_URL = process.env.APP_URL || "http://localhost:3000";
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -45,6 +48,54 @@ const CHECKPOINTS = [
   { name: "FINISH", km: 1 },
 ];
 
+function createTransporter() {
+  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    return null;
+  }
+
+  return nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: Number(process.env.SMTP_PORT || 587) === 465,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+  });
+}
+
+async function sendVerificationEmail(email, token) {
+  const verificationUrl = `${APP_URL}/member/verify?token=${token}`;
+  const transporter = createTransporter();
+
+  if (!transporter) {
+    console.log("SMTP belum diset. Link verifikasi:", verificationUrl);
+    return { sent: false, verificationUrl };
+  }
+
+  await transporter.sendMail({
+    from: process.env.SMTP_FROM || process.env.SMTP_USER,
+    to: email,
+    subject: "ICF Banyumas - Verifikasi Akun Member",
+    html: `
+      <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111827">
+        <h2>Verifikasi Akun ICF Banyumas</h2>
+        <p>Terima kasih sudah mendaftar sebagai member ICF Banyumas.</p>
+        <p>Klik tombol berikut untuk aktivasi akun:</p>
+        <p>
+          <a href="${verificationUrl}" style="background:#2563eb;color:white;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:bold">
+            Aktivasi Akun
+          </a>
+        </p>
+        <p>Jika tombol tidak bisa diklik, buka link ini:</p>
+        <p>${verificationUrl}</p>
+      </div>
+    `,
+  });
+
+  return { sent: true, verificationUrl };
+}
+
 async function initDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS athletes (
@@ -53,6 +104,36 @@ async function initDB() {
       password VARCHAR(255) NOT NULL,
       athlete_name VARCHAR(100) NOT NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  await pool.query(`ALTER TABLE athletes ADD COLUMN IF NOT EXISTS email VARCHAR(150);`);
+  await pool.query(`ALTER TABLE athletes ADD COLUMN IF NOT EXISTS email_verified BOOLEAN DEFAULT true;`);
+  await pool.query(`ALTER TABLE athletes ADD COLUMN IF NOT EXISTS verification_token VARCHAR(255);`);
+  await pool.query(`ALTER TABLE athletes ADD COLUMN IF NOT EXISTS verification_expires TIMESTAMP;`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS member_profiles (
+      id SERIAL PRIMARY KEY,
+      athlete_id INTEGER UNIQUE NOT NULL REFERENCES athletes(id) ON DELETE CASCADE,
+      full_name VARCHAR(150),
+      address TEXT,
+      birth_place VARCHAR(150),
+      birth_date DATE,
+      gender VARCHAR(30),
+      weight DOUBLE PRECISION,
+      height DOUBLE PRECISION,
+      jersey_size VARCHAR(20),
+      member_status VARCHAR(50),
+      origin_name VARCHAR(150),
+      phone VARCHAR(50),
+      icf_number VARCHAR(100),
+      race_team VARCHAR(150),
+      cycling_community VARCHAR(150),
+      bike_type VARCHAR(100),
+      interested_events VARCHAR(100),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
   `);
 
@@ -209,6 +290,102 @@ app.post("/register", async (req, res) => {
   }
 });
 
+app.post("/member/register", async (req, res) => {
+  try {
+    const { email, username, password, athleteName } = req.body;
+
+    if (!email || !username || !password || !athleteName) {
+      return res.status(400).json({
+        success: false,
+        message: "email, username, password, dan athleteName wajib diisi",
+      });
+    }
+
+    const existing = await pool.query(
+      `SELECT id FROM athletes WHERE username = $1 OR email = $2`,
+      [username, email]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: "Username atau email sudah terdaftar",
+      });
+    }
+
+    const hash = await bcrypt.hash(password, 10);
+    const token = crypto.randomBytes(32).toString("hex");
+
+    const result = await pool.query(
+      `INSERT INTO athletes
+       (username, password, athlete_name, email, email_verified, verification_token, verification_expires)
+       VALUES ($1, $2, $3, $4, false, $5, NOW() + INTERVAL '24 hours')
+       RETURNING id, username, athlete_name, email, email_verified`,
+      [username, hash, athleteName, email, token]
+    );
+
+    const emailResult = await sendVerificationEmail(email, token);
+
+    res.json({
+      success: true,
+      message: emailResult.sent
+        ? "Register berhasil. Link verifikasi sudah dikirim ke email."
+        : "Register berhasil. SMTP belum diset, gunakan verificationUrl untuk testing.",
+      athlete: result.rows[0],
+      verificationUrl: emailResult.verificationUrl,
+      emailSent: emailResult.sent,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Register member gagal",
+      error: error.message,
+    });
+  }
+});
+
+app.get("/member/verify-email", async (req, res) => {
+  try {
+    const { token } = req.query;
+
+    if (!token) {
+      return res.status(400).send("Token verifikasi tidak ditemukan");
+    }
+
+    const result = await pool.query(
+      `SELECT * FROM athletes
+       WHERE verification_token = $1
+       AND verification_expires > NOW()`,
+      [token]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).send("Token tidak valid atau sudah expired");
+    }
+
+    await pool.query(
+      `UPDATE athletes
+       SET email_verified = true,
+           verification_token = NULL,
+           verification_expires = NULL
+       WHERE id = $1`,
+      [result.rows[0].id]
+    );
+
+    res.send(`
+      <div style="font-family:Arial;padding:40px">
+        <h1>Akun berhasil diverifikasi ✅</h1>
+        <p>Silakan kembali ke halaman member ICF Banyumas untuk login dan melengkapi biodata.</p>
+        <a href="${APP_URL}/member" style="background:#2563eb;color:white;padding:12px 18px;border-radius:999px;text-decoration:none;font-weight:bold">
+          Buka Halaman Member
+        </a>
+      </div>
+    `);
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
 app.post("/login", async (req, res) => {
   try {
     const { username, password } = req.body;
@@ -235,6 +412,13 @@ app.post("/login", async (req, res) => {
       });
     }
 
+    if (athlete.email && athlete.email_verified === false) {
+      return res.status(403).json({
+        success: false,
+        message: "Akun belum diverifikasi melalui email",
+      });
+    }
+
     const token = jwt.sign(
       {
         id: athlete.id,
@@ -253,12 +437,128 @@ app.post("/login", async (req, res) => {
         id: athlete.id,
         username: athlete.username,
         athleteName: athlete.athlete_name,
+        email: athlete.email,
+        emailVerified: athlete.email_verified,
       },
     });
   } catch (error) {
     res.status(500).json({
       success: false,
       message: "Login error",
+      error: error.message,
+    });
+  }
+});
+
+app.post("/member/profile", auth, async (req, res) => {
+  try {
+    const {
+      fullName,
+      address,
+      birthPlace,
+      birthDate,
+      gender,
+      weight,
+      height,
+      jerseySize,
+      status,
+      originName,
+      phone,
+      icfNumber,
+      raceTeam,
+      cyclingCommunity,
+      bikeType,
+      interestedEvents,
+    } = req.body;
+
+    const result = await pool.query(
+      `INSERT INTO member_profiles
+       (
+        athlete_id, full_name, address, birth_place, birth_date, gender,
+        weight, height, jersey_size, member_status, origin_name, phone,
+        icf_number, race_team, cycling_community, bike_type, interested_events,
+        updated_at
+       )
+       VALUES
+       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,NOW())
+       ON CONFLICT (athlete_id)
+       DO UPDATE SET
+        full_name = EXCLUDED.full_name,
+        address = EXCLUDED.address,
+        birth_place = EXCLUDED.birth_place,
+        birth_date = EXCLUDED.birth_date,
+        gender = EXCLUDED.gender,
+        weight = EXCLUDED.weight,
+        height = EXCLUDED.height,
+        jersey_size = EXCLUDED.jersey_size,
+        member_status = EXCLUDED.member_status,
+        origin_name = EXCLUDED.origin_name,
+        phone = EXCLUDED.phone,
+        icf_number = EXCLUDED.icf_number,
+        race_team = EXCLUDED.race_team,
+        cycling_community = EXCLUDED.cycling_community,
+        bike_type = EXCLUDED.bike_type,
+        interested_events = EXCLUDED.interested_events,
+        updated_at = NOW()
+       RETURNING *`,
+      [
+        req.user.id,
+        fullName,
+        address,
+        birthPlace,
+        birthDate || null,
+        gender,
+        Number(weight) || null,
+        Number(height) || null,
+        jerseySize,
+        status,
+        originName,
+        phone,
+        icfNumber,
+        raceTeam,
+        cyclingCommunity,
+        bikeType,
+        interestedEvents,
+      ]
+    );
+
+    await pool.query(
+      `UPDATE athletes SET athlete_name = $1 WHERE id = $2`,
+      [fullName || req.user.name, req.user.id]
+    );
+
+    res.json({
+      success: true,
+      message: "Profile member berhasil disimpan",
+      data: result.rows[0],
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Gagal menyimpan profile member",
+      error: error.message,
+    });
+  }
+});
+
+app.get("/member/profile", auth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT a.id, a.username, a.athlete_name, a.email, a.email_verified, mp.*
+       FROM athletes a
+       LEFT JOIN member_profiles mp ON mp.athlete_id = a.id
+       WHERE a.id = $1`,
+      [req.user.id]
+    );
+
+    res.json({
+      success: true,
+      data: result.rows[0] || null,
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: "Gagal mengambil profile member",
       error: error.message,
     });
   }
