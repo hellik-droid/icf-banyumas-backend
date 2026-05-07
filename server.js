@@ -39,7 +39,35 @@ app.post("/api/upload-gpx", uploadGpx.single("gpx"), (req, res) => {
     gpxUrl: `/uploads/routes/${req.file.filename}`,
   });
 });
+const flyerDir = path.join(__dirname, "uploads", "flyers");
 
+if (!fs.existsSync(flyerDir)) {
+  fs.mkdirSync(flyerDir, { recursive: true });
+}
+
+const flyerStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, flyerDir);
+  },
+  filename: function (req, file, cb) {
+    const safeName = file.originalname.replace(/\s+/g, "_");
+    cb(null, Date.now() + "-" + safeName);
+  },
+});
+
+const uploadFlyer = multer({ storage: flyerStorage });
+
+app.post("/api/upload-flyer", uploadFlyer.single("flyer"), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ message: "File flyer tidak ada" });
+  }
+
+  res.json({
+    message: "Flyer berhasil diupload",
+    filename: req.file.filename,
+    flyerUrl: `/uploads/flyers/${req.file.filename}`,
+  });
+});
 /* =========================
    STORAGE SEMENTARA (IN-MEMORY)
 ========================= */
