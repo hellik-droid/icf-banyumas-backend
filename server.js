@@ -1,17 +1,59 @@
 const express = require("express");
 const cors = require("cors");
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
 
 const app = express();
 
-
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
+const gpxDir = path.join(__dirname, "uploads", "routes");
+
+if (!fs.existsSync(gpxDir)) {
+  fs.mkdirSync(gpxDir, { recursive: true });
+}
+const gpxStorage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, gpxDir);
+  },
+  filename: function (req, file, cb) {
+    const originalName = file.originalname.replace(/\s+/g, "_");
+    cb(null, originalName);
+  },
+});
+
+const uploadGpx = multer({ storage: gpxStorage });
+
+app.post("/api/upload-gpx", uploadGpx.single("gpx"), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ message: "File GPX tidak ada" });
+  }
+
+  res.json({
+    message: "GPX berhasil diupload",
+    filename: req.file.filename,
+    gpxUrl: `/uploads/routes/${req.file.filename}`,
+  });
+});
 
 /* =========================
    STORAGE SEMENTARA (IN-MEMORY)
 ========================= */
 
-let events = [];
+let events = [
+  {
+    id: "17780270791655ee4f82b15eda8",
+    title: "ICF Banyumas Training",
+    name: "ICF Banyumas Training",
+    gpxUrl: "/uploads/routes/contoh.gpx"
+  }
+];
+console.log("JUMLAH EVENTS:", events.length);
+console.log("DATA EVENTS:", events);
 
 /* =========================
    EVENT API
@@ -83,7 +125,12 @@ app.get("/", (req, res) => {
 ========================= */
 
 const PORT = process.env.PORT || 5000;
-
+app.get("/api/test-events", (req, res) => {
+  res.json({
+    jumlah: events.length,
+    data: events
+  });
+});
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
